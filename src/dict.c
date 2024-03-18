@@ -47,6 +47,7 @@
 #include "zmalloc.h"
 #include "redisassert.h"
 #include "monotonic.h"
+#include "server.h"
 
 /* Using dictSetResizeEnabled() we make possible to disable
  * resizing and rehashing of the hash table as needed. This is very important
@@ -267,7 +268,7 @@ int _dictResize(dict *d, unsigned long size, int* malloc_failed)
 }
 
 int _dictExpand(dict *d, unsigned long size, int* malloc_failed) {
-    /* the size is invalid if it is smaller than the size of the hash table 
+    /* the size is invalid if it is smaller than the size of the hash table
      * or smaller than the number of elements already inside the hash table */
     if (dictIsRehashing(d) || d->ht_used[0] > size || DICTHT_SIZE(d->ht_size_exp[0]) >= size)
         return DICT_ERR;
@@ -349,7 +350,7 @@ static void rehashEntriesInBucketAtIndex(dict *d, uint64_t idx) {
 /* This checks if we already rehashed the whole table and if more rehashing is required */
 static int dictCheckRehashingCompleted(dict *d) {
     if (d->ht_used[0] != 0) return 0;
-    
+
     if (d->type->rehashingCompleted) d->type->rehashingCompleted(d);
     zfree(d->ht_table[0]);
     /* Copy the new ht onto the old one */
@@ -375,10 +376,10 @@ int dictRehash(dict *d, int n) {
     unsigned long s0 = DICTHT_SIZE(d->ht_size_exp[0]);
     unsigned long s1 = DICTHT_SIZE(d->ht_size_exp[1]);
     if (dict_can_resize == DICT_RESIZE_FORBID || !dictIsRehashing(d)) return 0;
-    /* If dict_can_resize is DICT_RESIZE_AVOID, we want to avoid rehashing. 
+    /* If dict_can_resize is DICT_RESIZE_AVOID, we want to avoid rehashing.
      * - If expanding, the threshold is dict_force_resize_ratio which is 4.
      * - If shrinking, the threshold is 1 / (HASHTABLE_MIN_FILL * dict_force_resize_ratio) which is 1/32. */
-    if (dict_can_resize == DICT_RESIZE_AVOID && 
+    if (dict_can_resize == DICT_RESIZE_AVOID &&
         ((s1 > s0 && s1 < dict_force_resize_ratio * s0) ||
          (s1 < s0 && s0 < HASHTABLE_MIN_FILL * dict_force_resize_ratio * s1)))
     {
@@ -443,10 +444,10 @@ int _dictBucketRehash(dict *d, uint64_t idx) {
     unsigned long s0 = DICTHT_SIZE(d->ht_size_exp[0]);
     unsigned long s1 = DICTHT_SIZE(d->ht_size_exp[1]);
     if (dict_can_resize == DICT_RESIZE_FORBID || !dictIsRehashing(d)) return 0;
-    /* If dict_can_resize is DICT_RESIZE_AVOID, we want to avoid rehashing. 
+    /* If dict_can_resize is DICT_RESIZE_AVOID, we want to avoid rehashing.
      * - If expanding, the threshold is dict_force_resize_ratio which is 4.
      * - If shrinking, the threshold is 1 / (HASHTABLE_MIN_FILL * dict_force_resize_ratio) which is 1/32. */
-    if (dict_can_resize == DICT_RESIZE_AVOID && 
+    if (dict_can_resize == DICT_RESIZE_AVOID &&
         ((s1 > s0 && s1 < dict_force_resize_ratio * s0) ||
          (s1 < s0 && s0 < HASHTABLE_MIN_FILL * dict_force_resize_ratio * s1)))
     {
@@ -737,11 +738,15 @@ dictEntry *dictFind(dict *d, const void *key)
         if (table == 0 && (long)idx < d->rehashidx) continue;
         idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
         he = d->ht_table[table][idx];
+        int traverse_length = 0;
         while(he) {
             void *he_key = dictGetKey(he);
-            if (key == he_key || dictCompareKeys(d, key, he_key))
+            if (key == he_key || dictCompareKeys(d, key, he_key)) {
+                printf("Key found, number of iterations: %d\n", traverse_length);
                 return he;
+            }
             he = dictGetNext(he);
+            traverse_length++;
         }
         if (!dictIsRehashing(d)) return NULL;
     }
@@ -1461,7 +1466,7 @@ static int dictTypeResizeAllowed(dict *d, size_t size) {
                     (double)d->ht_used[0] / DICTHT_SIZE(d->ht_size_exp[0]));
 }
 
-/* Returning DICT_OK indicates a successful expand or the dictionary is undergoing rehashing, 
+/* Returning DICT_OK indicates a successful expand or the dictionary is undergoing rehashing,
  * and there is nothing else we need to do about this dictionary currently. While DICT_ERR indicates
  * that expand has not been triggered (may be try shrinking?)*/
 int dictExpandIfNeeded(dict *d) {
@@ -1498,13 +1503,13 @@ static void _dictExpandIfNeeded(dict *d) {
     dictExpandIfNeeded(d);
 }
 
-/* Returning DICT_OK indicates a successful shrinking or the dictionary is undergoing rehashing, 
+/* Returning DICT_OK indicates a successful shrinking or the dictionary is undergoing rehashing,
  * and there is nothing else we need to do about this dictionary currently. While DICT_ERR indicates
  * that shrinking has not been triggered (may be try expanding?)*/
 int dictShrinkIfNeeded(dict *d) {
     /* Incremental rehashing already in progress. Return. */
     if (dictIsRehashing(d)) return DICT_OK;
-    
+
     /* If the size of hash table is DICT_HT_INITIAL_SIZE, don't shrink it. */
     if (DICTHT_SIZE(d->ht_size_exp[0]) <= DICT_HT_INITIAL_SIZE) return DICT_OK;
 
@@ -1523,7 +1528,7 @@ int dictShrinkIfNeeded(dict *d) {
     return DICT_ERR;
 }
 
-static void _dictShrinkIfNeeded(dict *d) 
+static void _dictShrinkIfNeeded(dict *d)
 {
     /* Automatic resizing is disallowed. Return */
     if (d->pauseAutoResize > 0) return;
@@ -1566,7 +1571,7 @@ void *dictFindPositionForInsert(dict *d, const void *key, dictEntry **existing) 
     /* Expand the hash table if needed */
     _dictExpandIfNeeded(d);
     for (table = 0; table <= 1; table++) {
-        if (table == 0 && (long)idx < d->rehashidx) continue; 
+        if (table == 0 && (long)idx < d->rehashidx) continue;
         idx = hash & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
         /* Search if this slot does not already contain the given key */
         he = d->ht_table[table][idx];
